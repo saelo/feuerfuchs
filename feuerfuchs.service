@@ -1,0 +1,9 @@
+[Unit]
+Description="feuerfuchs" challenge server
+After=multi-user.target
+[Service]
+Type=simple
+User=feuerfuchs
+ExecStart=/usr/bin/python3 -u /home/feuerfuchs/server.py
+[Install]
+WantedBy=multi-user.target

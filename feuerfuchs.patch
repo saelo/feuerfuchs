@@ -1,0 +1,139 @@
+diff --git a/js/src/vm/TypedArrayObject.cpp b/js/src/vm/TypedArrayObject.cpp
+index 55644b1..d1cc250 100644
+--- a/js/src/vm/TypedArrayObject.cpp
++++ b/js/src/vm/TypedArrayObject.cpp
+@@ -1279,7 +1279,13 @@ JS_FOR_EACH_TYPED_ARRAY(CHECK_TYPED_ARRAY_CONSTRUCTOR)
+ static bool
+ TypedArray_lengthGetter(JSContext* cx, unsigned argc, Value* vp)
+ {
+-    return TypedArrayObject::Getter<TypedArrayObject::lengthValue>(cx, argc, vp); \
++    return TypedArrayObject::Getter<TypedArrayObject::lengthValue>(cx, argc, vp);
++}
++
++static bool
++TypedArray_lengthSetter(JSContext* cx, unsigned argc, Value* vp)
++{
++    return TypedArrayObject::Setter<TypedArrayObject::lengthSetter>(cx, argc, vp);
+ }
+ 
+ static bool
+@@ -1289,6 +1295,18 @@ TypedArray_byteLengthGetter(JSContext* cx, unsigned argc, Value* vp)
+ }
+ 
+ static bool
++TypedArray_offsetGetter(JSContext* cx, unsigned argc, Value* vp)
++{
++    return TypedArrayObject::Getter<TypedArrayObject::offsetValue>(cx, argc, vp);
++}
++
++static bool
++TypedArray_offsetSetter(JSContext* cx, unsigned argc, Value* vp)
++{
++    return TypedArrayObject::Setter<TypedArrayObject::offsetSetter>(cx, argc, vp);
++}
++
++static bool
+ TypedArray_byteOffsetGetter(JSContext* cx, unsigned argc, Value* vp)
+ {
+     return TypedArrayObject::Getter<TypedArrayObject::byteOffsetValue>(cx, argc, vp);
+@@ -1314,9 +1332,10 @@ TypedArray_bufferGetter(JSContext* cx, unsigned argc, Value* vp)
+ 
+ /* static */ const JSPropertySpec
+ TypedArrayObject::protoAccessors[] = {
+-    JS_PSG("length", TypedArray_lengthGetter, 0),
+     JS_PSG("buffer", TypedArray_bufferGetter, 0),
++    JS_PSGS("length", TypedArray_lengthGetter, TypedArray_lengthSetter, 0),
+     JS_PSG("byteLength", TypedArray_byteLengthGetter, 0),
++    JS_PSGS("offset", TypedArray_offsetGetter, TypedArray_offsetSetter, 0),
+     JS_PSG("byteOffset", TypedArray_byteOffsetGetter, 0),
+     JS_PS_END
+ };
+diff --git a/js/src/vm/TypedArrayObject.h b/js/src/vm/TypedArrayObject.h
+index 6ac951a..3ae8934 100644
+--- a/js/src/vm/TypedArrayObject.h
++++ b/js/src/vm/TypedArrayObject.h
+@@ -135,12 +135,44 @@ class TypedArrayObject : public NativeObject
+         MOZ_ASSERT(v.toInt32() >= 0);
+         return v;
+     }
++    static Value offsetValue(TypedArrayObject* tarr) {
++        return Int32Value(tarr->getFixedSlot(BYTEOFFSET_SLOT).toInt32() / tarr->bytesPerElement());
++    }
++    static bool offsetSetter(JSContext* cx, Handle<TypedArrayObject*> tarr, uint32_t newOffset) {
++        // Ensure that the new offset does not extend beyond the current bounds
++        if (newOffset > tarr->offset() + tarr->length())
++            return false;
++
++        int32_t diff = newOffset - tarr->offset();
++
++        ensureHasBuffer(cx, tarr);
++        uint8_t* ptr = static_cast<uint8_t*>(tarr->viewDataEither_());
++
++        tarr->setFixedSlot(LENGTH_SLOT, Int32Value(tarr->length() - diff));
++        tarr->setFixedSlot(BYTEOFFSET_SLOT, Int32Value(newOffset * tarr->bytesPerElement()));
++        tarr->setPrivate(ptr + diff * tarr->bytesPerElement());
++
++        return true;
++    }
+     static Value byteLengthValue(TypedArrayObject* tarr) {
+         return Int32Value(tarr->getFixedSlot(LENGTH_SLOT).toInt32() * tarr->bytesPerElement());
+     }
+     static Value lengthValue(TypedArrayObject* tarr) {
+         return tarr->getFixedSlot(LENGTH_SLOT);
+     }
++    static bool lengthSetter(JSContext* cx, Handle<TypedArrayObject*> tarr, uint32_t newLength) {
++        if (newLength > tarr->length()) {
++            // Ensure the underlying buffer is large enough
++            ensureHasBuffer(cx, tarr);
++            ArrayBufferObjectMaybeShared* buffer = tarr->bufferEither();
++            if (tarr->byteOffset() + newLength * tarr->bytesPerElement() > buffer->byteLength())
++                return false;
++        }
++
++        tarr->setFixedSlot(LENGTH_SLOT, Int32Value(newLength));
++        return true;
++    }
++
+ 
+     static bool
+     ensureHasBuffer(JSContext* cx, Handle<TypedArrayObject*> tarray);
+@@ -154,6 +186,9 @@ class TypedArrayObject : public NativeObject
+     uint32_t byteOffset() const {
+         return byteOffsetValue(const_cast<TypedArrayObject*>(this)).toInt32();
+     }
++    uint32_t offset() const {
++        return offsetValue(const_cast<TypedArrayObject*>(this)).toInt32();
++    }
+     uint32_t byteLength() const {
+         return byteLengthValue(const_cast<TypedArrayObject*>(this)).toInt32();
+     }
+@@ -280,6 +315,29 @@ class TypedArrayObject : public NativeObject
+         return CallNonGenericMethod<is, GetterImpl<ValueGetter>>(cx, args);
+     }
+ 
++    template<bool ValueSetter(JSContext* cx, Handle<TypedArrayObject*> tarr, uint32_t value)>
++    static bool
++    SetterImpl(JSContext* cx, const CallArgs& args)
++    {
++        MOZ_ASSERT(is(args.thisv()));
++        double value;
++        if (!ToNumber(cx, args.get(0), &value))
++            return false;
++
++        Rooted<TypedArrayObject*> thisv(cx, &args.thisv().toObject().as<TypedArrayObject>());
++        args.rval().setBoolean(ValueSetter(cx, thisv, uint32_t(value)));
++        return true;
++    }
++
++    template<bool ValueSetter(JSContext* cx, Handle<TypedArrayObject*> tarr, uint32_t value)>
++    static bool
++    Setter(JSContext* cx, unsigned argc, Value* vp)
++    {
++        CallArgs args = CallArgsFromVp(argc, vp);
++        return CallNonGenericMethod<is, SetterImpl<ValueSetter>>(cx, args);
++    }
++
++
+     static const JSFunctionSpec protoFunctions[];
+     static const JSPropertySpec protoAccessors[];
+     static const JSFunctionSpec staticFunctions[];
